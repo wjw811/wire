@@ -1,0 +1,26 @@
+# 日志和缓存
+data/log/*
+data/cache/twig/*
+logs/*
+*.log
+
+# 软件运行环境 (不建议备份到代码仓库)
+php/
+db/redis/
+pomo.exe
+pomo.exe~
+cmd/pomo/bin/*
+
+# 前端依赖和编译结果
+**/node_modules
+x/admin/dist
+x/admin/node_modules
+
+# 配置文件
+# 如果你希望备份默认配置，可以取消下面这行的注释
+# config.php
+
+# 其它
+.DS_Store
+*.swp
+Thumbs.db

@@ -1,0 +1,19 @@
+{
+  "devices": [
+    {
+      "id": 1,
+      "name": "设备1",
+      "ip": "10.10.100.254",
+      "port": 18899,
+      "bridgePort": 18900
+    }
+  ],
+  "autoScan": {
+    "enabled": false,
+    "subnet": "10.10.100",
+    "startIP": 1,
+    "endIP": 254,
+    "port": 18899
+  }
+}
+

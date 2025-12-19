@@ -1,0 +1,1 @@
+window.__PRODUCTION__POWER__CONF__={"VITE_GLOB_APP_TITLE":"Power","VITE_GLOB_APP_SHORT_NAME":"Power","VITE_GLOB_API_URL":"/admin","VITE_GLOB_UPLOAD_URL":"/admin/common/upload","VITE_GLOB_API_URL_PREFIX":""};Object.freeze(window.__PRODUCTION__POWER__CONF__);Object.defineProperty(window,"__PRODUCTION__POWER__CONF__",{configurable:false,writable:false,});

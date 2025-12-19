@@ -1,0 +1,12 @@
+debug: false
+tcp:
+  url: '0.0.0.0:2024'
+  chan: 20
+  maxconn: 1024  # max conntions
+  timeout: 180   # read or wirte timeout unit second
+  timer: 3       # polling timer unit second
+  slice: 100     # loop duration unit millisecond 
+http:
+  url: '0.0.0.0:2010' 
+notify: 'http://127.0.0.1:8000/rpc/dev'
+notify: 'http://127.0.0.1:8000/rpc/dev'

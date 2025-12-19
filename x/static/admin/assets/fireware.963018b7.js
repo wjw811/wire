@@ -1,0 +1,1 @@
+import{i as t}from"./index.69a4dfca.js";const r=e=>t.get({url:"/fireware",params:e}),o=e=>t.post({url:"/fireware/add",params:e}),s=e=>t.post({url:"/fireware/edit",params:e}),a=e=>t.post({url:"/fireware/delete",params:e}),p=()=>t.post({url:"/fireware/option",headers:{pinyin:"name"}});export{o as a,a as d,s as e,r as g,p as o};

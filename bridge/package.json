@@ -1,0 +1,14 @@
+﻿{
+  "name": "ws-tcp-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "WebSocket to TCP bridge",
+  "main": "bridge.js",
+  "scripts": {
+    "start": "node bridge.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
