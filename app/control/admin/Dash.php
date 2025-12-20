@@ -277,6 +277,7 @@ class Dash extends \Next\Core\Control {
                     'k' => $n,
                     'v' => $v,
                     'u' => $u,
+                    'key' => $k, // ✨ 新增：返回原始键名 f01, f02 等
                 ];
             }
 
@@ -488,6 +489,7 @@ class Dash extends \Next\Core\Control {
 
         // 生成唯一的任务ID
         $taskId = uniqid('batch_', true);
+        error_log(sprintf('[batchQueryAsync] 开始任务 > taskId=%s id=%d startAddr=%d count=%d', $taskId, $id, $startAddr, $count));
         
         // 构造批量查询协议：AA 01 07 E2 02 00 00 02 D5 10
         // 其中：01-设备地址（固定为1），07-从E2开始到校验码的长度，E2-读连续标志位
@@ -573,9 +575,11 @@ class Dash extends \Next\Core\Control {
         $val = $r->hGet($key, 'batch_data');
         
         if ($val) {
+            error_log(sprintf('[batchQueryResult] 命中数据 > taskId=%s key=%s val_len=%d', $taskId, $key, strlen($val)));
             // 解析批量数据：JSON格式 {"values":[0,16],"count":2,"timestamp":1234567890}
             $responseData = json_decode($val, true);
             if ($responseData && isset($responseData['values']) && isset($responseData['count'])) {
+                error_log(sprintf('[batchQueryResult] 数据匹配成功 > taskId=%s count=%d', $taskId, $responseData['count']));
                 // 清除任务和响应数据
                 $r->del($taskKey);
                 $r->hDel($key, 'batch_data');
@@ -590,11 +594,13 @@ class Dash extends \Next\Core\Control {
 
         // 检查任务是否超时（超过30秒）
         if ((time() - $task['timestamp']) > 30) {
+            error_log(sprintf('[batchQueryResult] 任务超时 > taskId=%s', $taskId));
             $r->del($taskKey);
             $this->json(0, '批量查询超时', ['status' => 'failed']);
         }
 
         // 任务仍在处理中
+        error_log(sprintf('[batchQueryResult] 任务处理中... > taskId=%s key=%s', $taskId, $key));
         $this->json(0, '任务处理中', ['status' => 'pending']);
     }
 /*}}}*/
@@ -905,6 +911,7 @@ class Dash extends \Next\Core\Control {
                     'k' => $n,
                     'v' => $v,
                     'u' => $u,
+                    'key' => $k, // ✨ 新增：返回原始键名 f01, f02 等
                 ];
             }
 
@@ -1022,17 +1029,38 @@ class Dash extends \Next\Core\Control {
         $id = $this->params('id');
         $mode = $this->params('mode');
         
-        error_log(sprintf('[cmd] 开始 > id=%s mode=%s', $id, $mode));
+        // 增加更详细的请求日志
+        error_log(sprintf('[cmd] 收到请求 > id=%s mode=%s method=%s uri=%s', 
+            $id, $mode, $_SERVER['REQUEST_METHOD'], $_SERVER['REQUEST_URI']));
+
+        // ✨ 修复：batchQueryResult 不需要校验设备 ID，因为它只查任务状态
+        if ($mode === 'batchQueryResult') {
+            error_log('[cmd] 转发到 batchQueryResult');
+            return $this->batchQueryResult();
+        }
 
         $m = new \app\model\Dev();
         if (!$dev = $m->get(['serial', 'gid'], ['id' => $id])) {
             error_log(sprintf('[cmd] 错误 > 设备未找到 id=%s', $id));
-            $this->json(40401, '设备未知');
+            $this->json(40401, '设备未知（ID:' . $id . '）');
         }
+        
         error_log(sprintf('[cmd] 设备信息 > serial=%s gid=%s', $dev['serial'], $dev['gid']));
         $m = new \app\model\Gateway();
         if (!$gateway = $m->get(['serial'], ['id' => $dev['gid']])) {
             $this->json(40402, '网关未知');
+        }
+
+        $outerTk = $this->nextOuterTk($gateway['serial']);
+        
+        // 特权通道：直接调用现成的批量函数，不再走下面的通用流程
+        if ($mode === 'batchQueryAsync') {
+            error_log('[cmd] 转发到 batchQueryAsync');
+            return $this->batchQueryAsync();
+        }
+        if ($mode === 'batchSave') {
+            error_log('[cmd] 转发到 batchSave');
+            return $this->batchSave();
         }
 
         $uri = '/rpc/push';
@@ -1041,7 +1069,7 @@ class Dash extends \Next\Core\Control {
             'chan' => 0x01,
             'data' => '',
         ];
-        $outerTk = $this->nextOuterTk($gateway['serial']);
+
         switch($mode) {
         case 'run':
             $deviceSerial = 1; // 固定使用设备号1
@@ -1121,6 +1149,12 @@ class Dash extends \Next\Core\Control {
             error_log(sprintf('[cmd:syn] 发送指令 (内层) > %s', $innerData));
             
            break; 
+        case 'batchQueryAsync':
+            return $this->batchQueryAsync();
+        case 'batchQueryResult':
+            return $this->batchQueryResult();
+        case 'batchSave':
+            return $this->batchSave();
         default:
             $baud = $this->params('baud');
             $parity = $this->params('parity');

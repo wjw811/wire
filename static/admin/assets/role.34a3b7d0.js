@@ -1,0 +1,1 @@
+import{am as t}from"./index.a544321c.js";const s=e=>t.get({url:"/auth/role",params:e}),l=e=>t.post({url:"/auth/role-add",params:e}),i=e=>t.post({url:"/auth/role-edit",params:e}),a=e=>t.post({url:"/auth/role-delete",params:e}),r=e=>t.get({url:"/auth/privilege",params:e}),p=e=>t.post({url:"/auth/set-privilege",params:e});export{l as a,r as b,a as d,i as e,s as g,p as s};

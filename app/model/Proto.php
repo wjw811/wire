@@ -232,17 +232,14 @@ class Proto extends \Next\Core\Model {
             $d['f60'] = $this->m($x[119]<<8|$x[120]); //工作模式
 
             // action control: run, stp, rst
+            // 根据用户反馈：逻辑再次反转回来
+            // b1=0 表示运行中，禁用启动按钮 (run)
+            // b1=1 表示已停止，禁用停机按钮 (stp)
             $b1 = ($x[43] & 0x02) == 0? 0: 1;
-            $b5 = ($x[43] & 0x20) == 0? 0: 1;
-            $d['limit'] = ['run', 'stp', 'rst'];
             if ($b1 == 0) {
-                $d['limit'] = ['run', 'rst'];
+                $d['limit'] = ['run'];
             } else {
-                if ($b5 == 1) {
-                    $d['limit'] = ['run', 'stp'];
-                } else {
-                    $d['limit'] = ['stp'];
-                }
+                $d['limit'] = ['stp'];
             }
             return $d;
         }

@@ -226,6 +226,7 @@ class Dev extends \Next\Core\Control {
         
         $values = $this->params('values');
         $count = $this->params('count');
+        $deviceSerialFromGo = $this->params('deviceSerial');
         
         // 强制地址1映射到第一个设备
         $resolvedDevSerial = '1'; 
@@ -240,6 +241,8 @@ class Dev extends \Next\Core\Control {
         }
 
         $key = sprintf('p:%s:%s', $gid, $resolvedDevSerial);
+        error_log(sprintf('[rpc/batch_query] 收到通知 > sn=%s gid=%s dev=%s resolved=%s key=%s count=%d', $sn, $gid, $deviceSerialFromGo, $resolvedDevSerial, $key, $count));
+        
         $responseData = [
             'values' => $values,
             'count' => $count,

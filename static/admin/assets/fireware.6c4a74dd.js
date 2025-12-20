@@ -1,0 +1,1 @@
+import{am as t}from"./index.a544321c.js";const i=e=>t.get({url:"/fireware",params:e}),a=e=>t.post({url:"/fireware/add",params:e}),o=e=>t.post({url:"/fireware/edit",params:e}),s=e=>t.post({url:"/fireware/delete",params:e}),p=()=>t.post({url:"/fireware/option",headers:{pinyin:"name"}});export{a,s as d,o as e,i as g,p as o};

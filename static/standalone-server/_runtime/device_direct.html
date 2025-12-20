@@ -1557,7 +1557,8 @@
                 </div>
             </div>
             <div class="btn-group">
-                <button class="btn btn-primary" onclick="connectDevice()" id="btnConnect">
+                <!-- 隐藏连接按钮，系统内默认已在线 -->
+                <button class="btn btn-primary" onclick="connectDevice()" id="btnConnect" style="display: none;">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                         <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"></path>
                     </svg>
@@ -1958,6 +1959,8 @@
                 disconnected: '未连接',
                 connecting: '连接中...',
                 serverMode: '服务器模式',
+                running: '运行中',
+                stopped: '已停止',
                 // 按钮
                 btnConnect: '连接',
                 btnDisconnect: '断开',
@@ -2830,6 +2833,7 @@
         let failoverTimer = null;        // 故障转移定时器
         let isUsingServerMode = false;   // 是否使用服务器模式
         let serverPollingTimer = null;   // 服务器轮询定时器
+        let paramCache = {};            // ✨ 新增：全局参数缓存
         const FAILOVER_TIMEOUT = 60000;  // 1分钟后切换到服务器模式
         
         // 外层协议序列号管理（1-255循环）
@@ -4106,7 +4110,7 @@
         
         // 批量查询谐波组
         function batchQueryHarmonicGroups() {
-            if (!ws || ws.readyState !== 1) {
+            if (!isUsingServerMode && !window.isUsingServerMode && (!ws || ws.readyState !== 1)) {
                 alert(t('alertNotConnectedSimple') || '设备未连接');
                 return;
             }
@@ -4186,7 +4190,7 @@
         
         // 批量保存谐波组
         function batchSaveHarmonicGroups() {
-            if (!ws || ws.readyState !== 1) {
+            if (!isUsingServerMode && !window.isUsingServerMode && (!ws || ws.readyState !== 1)) {
                 alert(t('alertNotConnectedSimple') || '设备未连接');
                 return;
             }
@@ -4575,10 +4579,23 @@
             
             // 启动服务器轮询（每3秒）
             serverPollingTimer = setInterval(queryDeviceFromServer, 3000);
+            
+            // ✨ 修复：服务器模式下更新 UI 显示为“已连接”
+            updateStatus(true);
+            
+            // ✨ 新增：服务器模式下自动同步一次关键参数 (地址513)，解决仪表盘显示问题
+            setTimeout(() => {
+                if (isUsingServerMode) {
+                    addLog('debug', '正在自动同步补偿模式 (513) 以更新仪表盘显示...');
+                    queryParam(513, 'comp_mode');
+                }
+            }, 2000);
         }
         
         // 从服务器查询设备数据
         function queryDeviceFromServer() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const devId = urlParams.get('id');
             const deviceSerial = document.getElementById('deviceSerial').value || '1';
             
             // 通过HTTP API查询设备数据
@@ -4586,15 +4603,27 @@
                 .then(response => response.json())
                 .then(data => {
                     if (data.code === 0 && data.result && data.result.info) {
-                        // 查找匹配序列号的设备
-                        const deviceInfo = data.result.info.find(d => d.serial === deviceSerial);
+                        // 查找匹配的设备，优先使用 ID 匹配，其次使用序列号
+                        let deviceInfo = null;
+                        if (devId) {
+                            deviceInfo = data.result.info.find(d => String(d.id) === String(devId));
+                        }
+                        if (!deviceInfo) {
+                            deviceInfo = data.result.info.find(d => d.serial === deviceSerial);
+                        }
                         
                         if (deviceInfo && deviceInfo.data && deviceInfo.data.length > 0) {
                             // 转换设备数据格式为 f01-f60 格式
                             const deviceData = convertServerDataToDeviceFormat(deviceInfo);
                             
+                            // 记录服务器返回的告警状态
+                            deviceData._serverWarn = deviceInfo.warn;
+                            
                             // 显示数据
                             displayParams(deviceData);
+                            
+                            // 更新按钮状态及横幅状态
+                            updateButtonStates();
                             
                             // 更新时间
                             document.getElementById('updateTime').textContent = deviceInfo.time || new Date().toLocaleTimeString();
@@ -4612,16 +4641,22 @@
         
         // 转换服务器数据格式为设备数据格式
         function convertServerDataToDeviceFormat(deviceInfo) {
-            // 服务器返回的data数组格式：[{k: '参数名', v: '值', u: '单位'}, ...]
-            // 需要转换为 {f01: value, f02: value, ...} 格式
-            
             const deviceData = {};
             
             if (deviceInfo.data && Array.isArray(deviceInfo.data)) {
                 deviceInfo.data.forEach((item, index) => {
-                    // 简单映射：假设参数按顺序对应 f01-f60
-                    const key = `f${String(index + 1).padStart(2, '0')}`;
-                    deviceData[key] = parseFloat(item.v) || item.v;
+                    // 优先使用后端返回的 key，如果没有则根据索引生成
+                    const key = item.key || `f${String(index + 1).padStart(2, '0')}`;
+                    
+                    // 处理 null 值，确保不被转换为 0
+                    if (item.v === null || item.v === undefined) {
+                        deviceData[key] = undefined;
+                    } else {
+                        deviceData[key] = parseFloat(item.v);
+                        if (isNaN(deviceData[key])) {
+                            deviceData[key] = item.v;
+                        }
+                    }
                 });
             }
             
@@ -4823,6 +4858,36 @@
         
         // 发送控制命令
         function sendCommand(mode) {
+            // 如果是服务器模式，通过 API 发送命令
+            if (isUsingServerMode) {
+                const urlParams = new URLSearchParams(window.location.search);
+                const devId = urlParams.get('id');
+                
+                if (!devId) {
+                    addLog('error', '❌ 服务器模式下发送指令需要 URL 包含 id 参数');
+                    alert('服务器模式下发送指令需要 URL 包含 id 参数');
+                    return;
+                }
+
+        addLog('info', `📡 服务器模式：正在通过 API 发送 ${mode} 命令...`);
+        // 修正：服务器模式下通过 /admin/dash/cmd 转发控制命令
+        fetch(`/admin/dash/cmd?id=${devId}&mode=${mode}`)
+            .then(response => response.json())
+            .then(data => {
+                if (data.code === 0) {
+                    addLog('info', `✅ 指令发送成功 (${mode})`);
+                    // 指令成功后立即触发一次刷新，获取最新状态
+                    setTimeout(queryDeviceFromServer, 500); 
+                } else {
+                    addLog('error', `❌ 指令发送失败: ${data.msg || '未知错误'}`);
+                }
+            })
+                    .catch(error => {
+                        addLog('error', `❌ API 请求异常: ${error.message}`);
+                    });
+                return;
+            }
+
             // 检查连接状态
             if (!ws || ws.readyState !== 1) {
                 alert(t('alertNotConnected'));
@@ -4873,7 +4938,7 @@
         }
         
         // 更新连接状态
-        function updateStatus(connected) {
+        function updateStatus(connected, running = null) {
             isConnected = connected;
             const dot = document.getElementById('statusDot');
             const text = document.getElementById('statusText');
@@ -4882,13 +4947,29 @@
             
             if (connected) {
                 dot.classList.add('connected');
-                text.textContent = t('connected');
-                text.style.color = '#52c41a';
+                
+                // 根据运行状态更新显示
+                if (running === true) {
+                    text.textContent = t('running');
+                    text.style.color = '#52c41a';
+                    dot.style.backgroundColor = '#52c41a';
+                } else if (running === false) {
+                    text.textContent = t('stopped');
+                    text.style.color = '#faad14'; // 橙色/警告色表示已停止
+                    dot.style.backgroundColor = '#faad14';
+                } else {
+                    // 如果没有明确的运行状态，显示连接状态
+                    text.textContent = isUsingServerMode ? t('serverMode') : t('connected');
+                    text.style.color = isUsingServerMode ? '#1890ff' : '#52c41a';
+                    dot.style.backgroundColor = isUsingServerMode ? '#1890ff' : '#52c41a';
+                }
+                
                 btn.className = 'btn btn-warning';
                 btn.onclick = disconnectDevice;
                 if (btnLabel) btnLabel.textContent = t('btnDisconnect');
             } else {
                 dot.classList.remove('connected');
+                dot.style.backgroundColor = '#ccc';
                 text.textContent = t('disconnected');
                 text.style.color = '#999';
                 btn.className = 'btn btn-primary';
@@ -5142,10 +5223,23 @@
         
         // 更新按钮状态
         // 注意：limit数组中包含的是【禁用】的按钮，不是启用的
+        // 更新按钮状态
+        // 注意：limit数组中包含的是【禁用】的按钮，不是启用的
         function updateButtonStates() {
-            const btnStart = document.querySelector('button[onclick*="sendCommand(\'run\')"]');
-            const btnStop = document.querySelector('button[onclick*="sendCommand(\'stp\')"]');
-            const btnReset = document.querySelector('button[onclick*="sendCommand(\'rst\')"]');
+            const btnStart = document.getElementById('btnRun');
+            const btnStop = document.getElementById('btnStop');
+            const btnReset = document.getElementById('btnReset');
+            
+            // 根据 deviceLimit 判断当前运行状态
+            let isRunning = null;
+            if (deviceLimit.includes('run')) {
+                isRunning = true;  // 启动按钮被禁用，说明正在运行
+            } else if (deviceLimit.includes('stp')) {
+                isRunning = false; // 停机按钮被禁用，说明已停止
+            }
+            
+            // 更新横幅状态
+            updateStatus(isConnected, isRunning);
             
             if (btnStart) {
                 // 如果limit包含'run'，说明启动按钮应该禁用
@@ -5189,8 +5283,24 @@
         
         // 工作模式转换函数（与补偿模式显示一致）
         function convertWorkMode(value) {
+            // 如果是空或无效值，显示“--”
+            if (value === undefined || value === null || value === '' || value === '-' || value === '_') {
+                return '--';
+            }
+
+            // 如果值已经是中文字符串（服务器模式下），直接返回
+            if (typeof value === 'string' && /[\u4e00-\u9fa5]/.test(value)) {
+                return value;
+            }
+
+            const numValue = parseInt(value);
+            if (isNaN(numValue)) {
+                return '--';
+            }
+
             const modeMap = {
                 zh: {
+                    0: '停止/待机',
                     1: '不平衡补偿',
                     2: '无功补偿',
                     4: '谐波补偿',
@@ -5211,32 +5321,15 @@
                     144: '自老化发无功',
                     163: '无功+不平衡补偿',
                     167: '无功+不平衡+谐波补偿'
-                },
-                en: {
-                    1: 'Unbalance Compensation',
-                    2: 'Reactive Compensation',
-                    4: 'Harmonic Compensation',
-                    6: 'Reactive + Harmonic Compensation',
-                    13: 'Harmonic + Unbalance Compensation',
-                    14: 'Harmonic + Reactive Compensation',
-                    15: 'Harmonic + Unbalance + Reactive Compensation',
-                    16: 'Self-aging Reactive Output',
-                    35: 'Reactive + Unbalance Compensation',
-                    39: 'Reactive + Unbalance + Harmonic Compensation',
-                    129: 'Unbalance Compensation',
-                    130: 'Reactive Compensation',
-                    132: 'Harmonic Compensation',
-                    134: 'Reactive + Harmonic Compensation',
-                    141: 'Harmonic + Unbalance Compensation',
-                    142: 'Harmonic + Reactive Compensation',
-                    143: 'Harmonic + Unbalance + Reactive Compensation',
-                    144: 'Self-aging Reactive Output',
-                    163: 'Reactive + Unbalance Compensation',
-                    167: 'Reactive + Unbalance + Harmonic Compensation'
                 }
             };
-            const lang = modeMap[currentLang] ? currentLang : 'zh';
-            return modeMap[lang][value] || modeMap.zh[value] || (currentLang === 'en' ? `Unknown Mode(${value})` : `未知模式(${value})`);
+            const lang = 'zh';
+            const converted = modeMap[lang][numValue];
+            
+            if (converted) return converted;
+            
+            // 如果是数字但没匹配到，显示原始模式
+            return '模式 ' + numValue;
         }
         
         // 解析CK数据 - 完整f01-f60
@@ -5248,21 +5341,25 @@
                 return v / percent;
             }
             
-            const f60Value = (bytes[119] << 8) | bytes[120];
+            // 修改：运行模式（工作模式）优先根据地址513（f51，对应bytes[104]）显示
+            const f51Value = bytes[104] || 0;
+            const f60Raw = (bytes[119] << 8) | bytes[120];
+            // 如果513地址有值且不为0，优先使用513地址的值作为运行模式显示
+            const displayModeValue = f51Value > 0 ? f51Value : f60Raw;
             
             // 解析按钮控制逻辑（根据bytes[43]的bit1和bit5）
-            const b1 = (bytes[43] & 0x02) === 0 ? 0 : 1;
-            const b5 = (bytes[43] & 0x20) === 0 ? 0 : 1;
-            let limit = ['run', 'stp', 'rst'];
+            // 调试：显示 f20 的原始值
+            addLog('debug', `[状态检查] f20 (bytes[43]) 原始值: 0x${bytes[43].toString(16).padStart(2, '0').toUpperCase()} (二进制: ${bytes[43].toString(2).padStart(8, '0')})`);
             
+            // 根据用户反馈：逻辑再次反转回来
+            // b1=0 表示运行中，禁用启动按钮 (run)
+            // b1=1 表示已停止，禁用停机按钮 (stp)
+            const b1 = (bytes[43] & 0x02) === 0 ? 0 : 1;
+            let limit = [];
             if (b1 === 0) {
-                limit = ['run', 'rst'];  // 只能启动和复位
+                limit = ['run'];
             } else {
-                if (b5 === 1) {
-                    limit = ['run', 'stp'];  // 可以启动和停止
-                } else {
-                    limit = ['stp'];  // 只能停止
-                }
+                limit = ['stp'];
             }
             
             return {
@@ -5326,7 +5423,7 @@
                 f57: b((bytes[113] << 8) | bytes[114]),
                 f58: b((bytes[115] << 8) | bytes[116]),
                 f59: b((bytes[117] << 8) | bytes[118]),
-                f60: convertWorkMode(f60Value)  // 转换为中文模式名称
+                f60: displayModeValue  // 返回原始数值，由 formatParamValue 进行转换显示
             };
         }
         
@@ -5336,27 +5433,23 @@
         }
 
         function formatParamValue(key, raw) {
+            // 特殊处理：运行模式 (f60) 需要转换
+            if (key === 'f60') {
+                return convertWorkMode(raw);
+            }
+
             // 值为0时也显示（特别是总谐波含量字段）
             if (raw === 0 || raw === '0') {
-                if (key === 'f60') {
-                    return raw;
-                }
                 return '0.00';
             }
             if (raw === undefined || raw === null || raw === '') {
                 return '--';
             }
             if (typeof raw === 'number') {
-                if (key === 'f60') {
-                    return raw;
-                }
                 return raw.toFixed(2);
             }
             const num = parseFloat(raw);
             if (!isNaN(num) && isFinite(num)) {
-                if (key === 'f60') {
-                    return raw;
-                }
                 return num.toFixed(2);
             }
             return raw;
@@ -5915,8 +6008,22 @@
                         card.keys.forEach((key, keyIndex) => {
                             // 特殊处理：运行模式（f60）只显示内容，不显示"工作模式"标签
                             if (card.titleKey === 'cardRunMode' && key === 'f60') {
-                            if (data.hasOwnProperty(key)) {
-                                    const value = formatParamValue(key, data[key]);
+                                if (data.hasOwnProperty(key)) {
+                                    let displayVal = data[key];
+                                    // 特殊处理：运行模式，如果 f60 为空（-），尝试用 f51 (对应地址513) 或缓存
+                                    if ((displayVal === '-' || displayVal === '_' || !displayVal)) {
+                                        if (data.f51 && data.f51 !== '-' && data.f51 !== '_') {
+                                            displayVal = data.f51;
+                                        } else if (paramCache[513] !== undefined) {
+                                            displayVal = paramCache[513];
+                                        }
+                                    }
+                                    
+                                    const value = formatParamValue(key, displayVal);
+                                    // 添加调试日志，帮助排查服务器返回的具体数值
+                                    if (key === 'f60') {
+                                        addLog('debug', `[运行模式] 最终取值: ${displayVal} (原始f60=${data[key]}, f51=${data.f51}), 转换后: ${value}`);
+                                    }
                                     const item = document.createElement('div');
                                     item.className = 'param-item';
                                     item.style.display = 'flex';
@@ -6098,12 +6205,26 @@
             const details = document.getElementById('faultDetails');
             const icon = banner.querySelector('.fault-icon');
             
+            // 如果服务器模式下明确返回没有告警，直接显示正常
+            if (isUsingServerMode && data._serverWarn === false) {
+                showNormalStatus(banner, icon, title, details, data);
+                return;
+            }
+
             // 解析故障位，收集故障信息
             const faults = [];
             const faultKeys = ['f51', 'f50', 'f49', 'f48'];  // 故障信息2,3,4,5
             
+            let allZero = true;
+            let hasData = false;
+
             faultKeys.forEach(key => {
                 const value = data[key];
+                if (value !== undefined) {
+                    hasData = true;
+                    if (parseInt(value) !== 0) allZero = false;
+                }
+
                 const lang = faultBitDef[currentLang] ? currentLang : 'zh';
                 if (value !== undefined && faultBitDef[lang] && faultBitDef[lang][key]) {
                     const byteValue = parseInt(value);
@@ -6121,38 +6242,48 @@
                     }
                 }
             });
-            
-            // 调试：在控制台输出故障解析结果
-            if (faults.length > 0) {
-                console.error('[故障检测] 检测到故障:', faults);
-                console.error('[故障原始值] f51:', data.f51, 'f50:', data.f50, 'f49:', data.f49, 'f48:', data.f48);
-            }
+
+            // 如果所有故障寄存器都是0且没有状态数据，可能是未收到真实数据，不显示故障
+            const finalFaults = (allZero && hasData && faults.length > 10) ? [] : faults;
             
             // 根据故障情况显示横幅
-            if (faults.length > 0) {
+            if (finalFaults.length > 0) {
                 // 有故障：红色警告
                 banner.className = 'fault-banner active';
                 icon.textContent = '⚠️';
                 icon.className = 'fault-icon';  // 重置图标类名，移除旋转动画
-                title.textContent = t('faultCountLabel').replace('{count}', faults.length);
+                title.textContent = t('faultCountLabel').replace('{count}', finalFaults.length);
                 
                 // 启动滚动显示
-                startFaultScroll(faults);
-            } else if (data.f20 !== undefined || data.f51 !== undefined) {
-                // 无故障：根据设备运行状态显示不同信息
-                banner.className = 'fault-banner active normal';
-                icon.textContent = '✅';
-                
-                // 优先检查复位状态：f20（状态）为247表示设备正在复位
-                const isResetting = data.f20 === 247;
-                
-                if (isResetting) {
-                    // 设备复位中：显示旋转的齿轮图标
-                    icon.textContent = '🔄';
-                    icon.className = 'fault-icon running-gear';
-                    title.textContent = t('deviceResettingTitle');
-                    details.innerHTML = `<div style="display: inline-block;">${t('deviceResettingDesc')}</div>`;
-                } else {
+                startFaultScroll(finalFaults);
+            } else if (data.f20 !== undefined || data.f51 !== undefined || (isUsingServerMode && hasData)) {
+                showNormalStatus(banner, icon, title, details, data);
+            } else {
+                // 无数据：隐藏横幅
+                banner.className = 'fault-banner';
+                icon.className = 'fault-icon';  // 重置图标类名
+                stopFaultScroll();
+                title.textContent = t('faultDetectingTitle');
+                details.textContent = t('faultDetectingDetails');
+            }
+        }
+
+        // 显示正常状态（复位/运行/待机）
+        function showNormalStatus(banner, icon, title, details, data) {
+            // 无故障：根据设备运行状态显示不同信息
+            banner.className = 'fault-banner active normal';
+            icon.textContent = '✅';
+            
+            // 优先检查复位状态：f20（状态）为247表示设备正在复位
+            const isResetting = data.f20 === 247;
+            
+            if (isResetting) {
+                // 设备复位中：显示旋转的齿轮图标
+                icon.textContent = '🔄';
+                icon.className = 'fault-icon running-gear';
+                title.textContent = t('deviceResettingTitle');
+                details.innerHTML = `<div style="display: inline-block;">${t('deviceResettingDesc')}</div>`;
+            } else {
                 // 判断设备是否正在运行
                 // deviceLimit中包含'run'表示启动按钮禁用，即设备正在运行
                 const isRunning = deviceLimit.includes('run');
@@ -6169,19 +6300,11 @@
                     icon.className = 'fault-icon';
                     title.textContent = t('deviceStandbyTitle');
                     details.innerHTML = `<div style="display: inline-block;">${t('deviceStandbyDesc')}</div>`;
-                    }
                 }
-                
-                // 停止滚动
-                stopFaultScroll();
-            } else {
-                // 无数据：隐藏横幅
-                banner.className = 'fault-banner';
-                icon.className = 'fault-icon';  // 重置图标类名
-                stopFaultScroll();
-                title.textContent = t('faultDetectingTitle');
-                details.textContent = t('faultDetectingDetails');
             }
+            
+            // 停止滚动
+            stopFaultScroll();
         }
         
         let lastFaultsStr = '';  // 记录上次的故障列表，用于比较
@@ -6430,8 +6553,53 @@
             });
         }
         
-        // 查询参数 - 直接通过WebSocket发送
+        // 查询参数
         async function queryParam(funcCode, fieldId) {
+            // 如果是服务器模式，通过 API 查询
+            if (isUsingServerMode) {
+                const urlParams = new URLSearchParams(window.location.search);
+                const devId = urlParams.get('id');
+                
+                if (!devId) {
+                    addLog('error', '❌ 服务器模式下查询参数需要 URL 包含 id 参数');
+                    return;
+                }
+
+                addLog('info', `📡 服务器模式：正在查询功能码 ${funcCode}...`);
+                
+                try {
+                    // 1. 发送同步指令
+                    await fetch(`/admin/dash/cmd?id=${devId}&cmd=${funcCode}&mode=syn`);
+                    
+                    // 2. 轮询获取结果 (尝试 5 次)
+                    let val = null;
+                    for (let i = 0; i < 5; i++) {
+                        await new Promise(r => setTimeout(r, 1000));
+                        const res = await fetch(`/admin/dash/sync?id=${devId}&addr=${funcCode}`).then(r => r.json());
+                        if (res.code === 0 && res.result && res.result.val !== undefined && res.result.val !== null) {
+                            val = res.result.val;
+                            break;
+                        }
+                    }
+
+                    if (val !== null) {
+                        addLog('info', `✅ 查询成功：功能码 ${funcCode} = ${val}`);
+                        // 存入缓存
+                        paramCache[funcCode] = val;
+                        
+                        const element = document.getElementById(fieldId);
+                        if (element) {
+                            element.value = formatParamValueForDisplay(funcCode, val, fieldId);
+                        }
+                    } else {
+                        addLog('warn', `⚠️ 查询超时：未收到功能码 ${funcCode} 的设备响应`);
+                    }
+                } catch (error) {
+                    addLog('error', `❌ 查询异常: ${error.message}`);
+                }
+                return;
+            }
+
             if (!ws || ws.readyState !== 1) {
                 alert(t('alertNotConnectedSimple'));
                 return;
@@ -6455,13 +6623,8 @@
             addLog('info', '⏳ 等待设备响应...');
         }
         
-        // 保存参数 - 直接通过WebSocket发送
+        // 保存参数
         async function saveParam(funcCode, fieldId) {
-            if (!ws || ws.readyState !== 1) {
-                alert(t('alertNotConnectedSimple'));
-                return;
-            }
-            
             const element = document.getElementById(fieldId);
             const value = element.value;
             
@@ -6469,12 +6632,44 @@
                 alert(t('alertEnterValue'));
                 return;
             }
-            
-            const serial = parseInt(document.getElementById('deviceSerial').value) || 1;
-            // 使用反向函数将显示值（可能是文字）转换回数值
+
             const val = parseDisplayValueToNumber(funcCode, value, fieldId);
             if (val === null || val === undefined) {
                 alert(t('alertEnterValue'));
+                return;
+            }
+
+            // 如果是服务器模式，通过 API 保存
+            if (isUsingServerMode) {
+                const urlParams = new URLSearchParams(window.location.search);
+                const devId = urlParams.get('id');
+                
+                if (!devId) {
+                    addLog('error', '❌ 服务器模式下保存参数需要 URL 包含 id 参数');
+                    return;
+                }
+
+                addLog('info', `📡 服务器模式：正在保存功能码 ${funcCode}，值: ${val}...`);
+                
+                try {
+                    const res = await fetch(`/admin/dash/cmd?id=${devId}&cmd=${funcCode}&val=${val}&mode=pam`).then(r => r.json());
+                    if (res.code === 0) {
+                        addLog('info', `✅ 保存指令发送成功 (${funcCode}=${val})`);
+                        // 延迟后自动查询验证
+                        setTimeout(() => {
+                            queryParam(funcCode, fieldId);
+                        }, 2000);
+                    } else {
+                        addLog('error', `❌ 保存指令发送失败: ${res.msg || '未知错误'}`);
+                    }
+                } catch (error) {
+                    addLog('error', `❌ 保存请求异常: ${error.message}`);
+                }
+                return;
+            }
+
+            if (!ws || ws.readyState !== 1) {
+                alert(t('alertNotConnectedSimple'));
                 return;
             }
             const cmdHex = buildSetCmd(serial, funcCode, val);
@@ -6497,6 +6692,120 @@
         // 支持不连续的功能码，自动分成多次查询
         // 如果提供了callback参数，则调用回调函数而不是自动填充到输入框
         async function batchQuery(funcCodes, callback = null) {
+            // 如果是服务器模式，通过 API 查询
+            if (isUsingServerMode || window.isUsingServerMode) {
+                const urlParams = new URLSearchParams(window.location.search);
+                const devId = urlParams.get('id');
+                if (!devId) {
+                    addLog('error', '❌ 服务器模式下批量查询需要 URL 包含 id 参数');
+                    return;
+                }
+
+                // 将功能码分组，避免查询范围过大导致超时
+                const sortedCodes = [...funcCodes].sort((a, b) => a - b);
+                const groups = [];
+                if (sortedCodes.length > 0) {
+                    let currentGroup = [sortedCodes[0]];
+                    for (let i = 1; i < sortedCodes.length; i++) {
+                        // 如果两个码之间差距超过 50，则分段
+                        if (sortedCodes[i] - sortedCodes[i-1] > 50) {
+                            groups.push(currentGroup);
+                            currentGroup = [sortedCodes[i]];
+                        } else {
+                            currentGroup.push(sortedCodes[i]);
+                        }
+                    }
+                    groups.push(currentGroup);
+                }
+
+                addLog('info', `📡 服务器模式：正在分 ${groups.length} 组进行批量查询...`);
+                
+                try {
+                    const allResults = [];
+                    for (const group of groups) {
+                        const startAddr = group[0];
+                        const endAddr = group[group.length - 1];
+                        const count = endAddr - startAddr + 1;
+                        
+                        addLog('info', `⏳ 正在查询寄存器 ${startAddr} - ${endAddr}...`);
+                        
+                        // 修正：统一使用 GET 方式请求，增加兼容性
+                        const submitRes = await fetch(`/admin/dash/cmd?id=${devId}&startAddr=${startAddr}&count=${count}&mode=batchQueryAsync`).then(r => r.json());
+                        
+                        // 修正：根据服务器实际返回结构，从 .result 中提取 taskId
+                        const resData = submitRes.result || submitRes.data || submitRes;
+                        const taskId = resData.taskId;
+                        
+                        if (submitRes.code !== 0 || !taskId) {
+                            addLog('error', `❌ 组 ${startAddr} 提交失败: ${submitRes.message || submitRes.msg || '返回格式错误'}`);
+                            continue;
+                        }
+
+                        addLog('info', `⏳ 任务已提交，ID: ${taskId}，开始轮询结果...`);
+                        let valArray = null;
+
+                        // 轮询结果
+                        for (let i = 0; i < 15; i++) {
+                            await new Promise(r => setTimeout(r, 1000));
+                            addLog('debug', `🔍 正在第 ${i+1} 次查询任务 ${taskId} 的状态...`);
+                            
+                            const statusRes = await fetch(`/admin/dash/cmd?taskId=${taskId}&mode=batchQueryResult`).then(r => r.json());
+                            
+                            // 修正：根据服务器实际返回结构，提取 status
+                            const pollData = statusRes.result || statusRes.data || statusRes;
+                            
+                            if (pollData.status === 'completed') {
+                                addLog('success', `✅ 任务 ${taskId} 查询完成！`);
+                                // 修正：根据服务器实际返回结构，提取 values
+                                const result = pollData.result?.data || pollData.result || {};
+                                valArray = result.values || (Array.isArray(result) ? result : []);
+                                break;
+                            } else if (pollData.status === 'failed') {
+                                addLog('error', `❌ 任务 ${taskId} 查询失败（服务器返回失败）`);
+                                break;
+                            }
+                            
+                            if (i === 14) {
+                                addLog('warn', `⚠️ 任务 ${taskId} 查询超时（15秒未返回）`);
+                            }
+                        }
+
+                        if (valArray) {
+                            for (let i = 0; i < valArray.length; i++) {
+                                const code = startAddr + i;
+                                if (group.includes(code)) {
+                                    allResults.push({ funcCode: code, value: valArray[i] });
+                                }
+                            }
+                        }
+                    }
+
+                    if (allResults.length > 0) {
+                        addLog('info', `✅ 批量查询完成，成功读取 ${allResults.length} 个参数`);
+                        allResults.forEach(({ funcCode, value }) => {
+                            const fieldId = findFieldIdByFuncCode(funcCode);
+                            if (fieldId) {
+                                const element = document.getElementById(fieldId);
+                                if (element) {
+                                    element.value = formatParamValueForDisplay(funcCode, value, fieldId);
+                                }
+                            }
+                        });
+                        if (callback) callback(allResults);
+                    } else {
+                        addLog('warn', '⚠️ 批量查询未收到有效设备响应');
+                    }
+                } catch (error) {
+                    addLog('error', `❌ 批量查询异常: ${error.message}`);
+                }
+                return;
+            }
+
+            if (!ws || ws.readyState !== 1) {
+                alert(t('alertNotConnected'));
+                return;
+            }
+
             if (!ws || ws.readyState !== 1) {
                 alert(t('alertNotConnected'));
                 return;
@@ -6551,29 +6860,27 @@
                     const fieldId = findFieldIdByFuncCode(funcCode);
                     if (fieldId) {
                         addLog('info', `🔍 找到字段ID: ${fieldId}`);
-                        // 功能码512在系统参数Tab中应该填充到auto_enable_system
-                        const actualFieldId = (funcCode === 512 && currentParamTabIndex === 1) ? 'auto_enable_system' : fieldId;
-                        const element = document.getElementById(actualFieldId);
+                        const element = document.getElementById(fieldId);
                         if (element) {
                             // 使用格式化函数将数值转换为对应的文字显示
-                            element.value = formatParamValueForDisplay(funcCode, value, actualFieldId);
-                            addLog('info', `✅ 已更新 ${actualFieldId} (功能码${funcCode}) = ${element.value}`);
+                            element.value = formatParamValueForDisplay(funcCode, value, fieldId);
+                            addLog('info', `✅ 已更新 ${fieldId} (功能码${funcCode}) = ${element.value}`);
                         } else {
-                            addLog('warn', `⚠️ 未找到元素ID: ${actualFieldId}，尝试延迟填充...`);
+                            addLog('warn', `⚠️ 未找到元素ID: ${fieldId}，尝试延迟填充...`);
                             // 延迟100ms后重试，确保DOM已更新
                             setTimeout(() => {
-                                const retryElement = document.getElementById(actualFieldId);
+                                const retryElement = document.getElementById(fieldId);
                                 if (retryElement) {
-                                    if (actualFieldId === 'in_ct_ratio' || actualFieldId === 'dev_ct_ratio') {
+                                    if (fieldId === 'in_ct_ratio' || fieldId === 'dev_ct_ratio') {
                                         retryElement.value = value / 10;
-                                    } else if (actualFieldId === 'power_factor') {
+                                    } else if (fieldId === 'power_factor') {
                                         retryElement.value = (value / 100).toFixed(2);
                                     } else {
                                         retryElement.value = value;
                                     }
-                                    addLog('info', `✅ [延迟] 已更新 ${actualFieldId} (功能码${funcCode}) = ${retryElement.value}`);
+                                    addLog('info', `✅ [延迟] 已更新 ${fieldId} (功能码${funcCode}) = ${retryElement.value}`);
                                 } else {
-                                    addLog('error', `❌ [延迟] 仍未找到元素ID: ${actualFieldId}`);
+                                    addLog('error', `❌ [延迟] 仍未找到元素ID: ${fieldId}`);
                                 }
                             }, 100);
                         }
@@ -6662,6 +6969,68 @@
         
         // 批量保存（使用E1协议）
         async function batchSave(funcCodes, providedValues = null) {
+            // 如果是服务器模式，通过 API 保存
+            if (isUsingServerMode || window.isUsingServerMode) {
+                const urlParams = new URLSearchParams(window.location.search);
+                const devId = urlParams.get('id');
+                if (!devId) {
+                    addLog('error', '❌ 服务器模式下批量保存需要 URL 包含 id 参数');
+                    return;
+                }
+
+                // 准备批量保存数据
+                const batchData = [];
+                const sortedCodes = [...funcCodes].sort((a, b) => a - b);
+                
+                if (providedValues && Array.isArray(providedValues)) {
+                    sortedCodes.forEach((code, index) => {
+                        if (providedValues[index] !== undefined && providedValues[index] !== null) {
+                            batchData.push({ addr: code, val: providedValues[index] });
+                        }
+                    });
+                } else {
+                    for (const code of sortedCodes) {
+                        const fieldId = findFieldIdByFuncCode(code);
+                        if (fieldId) {
+                            const element = document.getElementById(fieldId);
+                            if (element) {
+                                const val = parseDisplayValueToNumber(code, element.value, fieldId);
+                                if (val !== null && val !== undefined) {
+                                    batchData.push({ addr: code, val: val });
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (batchData.length === 0) {
+                    addLog('warn', '⚠️ 批量保存：没有输入数值');
+                    alert('请先输入或选择需要保存的参数值');
+                    return;
+                }
+
+                addLog('info', `📡 服务器模式：正在批量下发 ${batchData.length} 个参数...`);
+                try {
+                    const res = await fetch(`/admin/dash/batch-save`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ id: devId, data: batchData, mode: 'batch_save' })
+                    }).then(r => r.json());
+
+                    if (res.code === 0) {
+                        addLog('info', '✅ 批量保存成功，系统将自动刷新验证...');
+                        // 稍微加长延迟以获得真实反馈
+                        setTimeout(() => batchQuery(funcCodes), 3000);
+                    } else {
+                        addLog('error', `❌ 批量保存失败: ${res.msg || '未知错误'}`);
+                        alert('保存失败: ' + (res.msg || '未知错误'));
+                    }
+                } catch (error) {
+                    addLog('error', `❌ 批量保存请求异常: ${error.message}`);
+                }
+                return;
+            }
+
             if (!ws || ws.readyState !== 1) {
                 alert(t('alertNotConnected'));
                 return;
@@ -6917,6 +7286,12 @@
         
         // 根据功能码查找字段ID
         function findFieldIdByFuncCode(code) {
+            // 特殊处理功能码512：根据当前所在Tab决定字段ID
+            // currentParamTabIndex === 1 表示当前处于“系统参数”Tab
+            if (code === 512 && typeof currentParamTabIndex !== 'undefined' && currentParamTabIndex === 1) {
+                return 'auto_enable_system';
+            }
+            
             const mapping = {
                 9: 'di_enable',
                 512: 'auto_enable',
@@ -7042,6 +7417,34 @@
             addLog('info', t('logPageReady'));
             addLog('info', t('logOfflineTip'));
              
+            // 处理 URL 参数
+            const urlParams = new URLSearchParams(window.location.search);
+            const serialParam = urlParams.get('serial');
+            const modeParam = urlParams.get('mode');
+            
+            if (serialParam) {
+                const serialInput = document.getElementById('deviceSerial');
+                if (serialInput) {
+                    serialInput.value = serialParam;
+                    addLog('info', `[系统] 从 URL 加载设备序列号: ${serialParam}`);
+                }
+            }
+            
+            if (modeParam === 'server') {
+                addLog('info', '[系统] 自动切换到服务器模式');
+                switchToServerMode();
+            } else if (modeParam === 'bridge' || modeParam === 'direct') {
+                const connectMode = document.getElementById('connectMode');
+                if (connectMode) {
+                    connectMode.value = modeParam;
+                    updateConnectConfig();
+                }
+                connectDevice();
+            } else {
+                // 默认逻辑
+                autoDetectAndConnect();
+            }
+
             // 更新手机访问地址显示
             updateMobileAccessUrl().catch(() => {});
 
@@ -7052,9 +7455,6 @@
             window.addEventListener('resize', () => {
                 applyMobileStyles();
             });
-
-            // 自动检测并连接
-            autoDetectAndConnect();
         };
         
         // 获取本地IP地址（使用WebRTC，类似ipconfig | findstr IPv4的效果）
@@ -7118,21 +7518,18 @@
         // 更新手机访问地址显示
         async function updateMobileAccessUrl() {
             const hostname = window.location.hostname;
-            const port = window.location.port || '18080';
-            let url;
+            const port = window.location.port || (window.location.protocol === 'https:' ? '443' : '80');
+            const search = window.location.search;
+            let displayHostname = hostname;
             
-            // 优先使用10.10.100.100（设备默认IP）
-            if (hostname && hostname.startsWith('10.10.100.')) {
-                // 如果当前访问的就是10.10.100.x网段，使用当前IP
-                url = `http://${hostname}:${port}/device_direct.html`;
-            } else if (hostname && hostname !== '' && hostname !== 'localhost' && hostname !== '127.0.0.1') {
-                // 使用当前访问的hostname和port（根据实际设备IP）
-                url = `http://${hostname}:${port}/device_direct.html`;
-            } else {
-                // 如果hostname是localhost或127.0.0.1，直接使用10.10.100.100
-                // 因为这是设备的默认IP地址
-                url = `http://10.10.100.100:${port}/device_direct.html`;
+            // 默认优先使用当前访问的域名/IP
+            if (!hostname || hostname === 'localhost' || hostname === '127.0.0.1') {
+                // 如果是本地访问，提供一个设备默认IP作为参考
+                displayHostname = '10.10.100.100';
             }
+            
+            // 构造完整URL，保留参数（如 id, serial, mode 等）
+            const url = `http://${displayHostname}:${port}/device_direct.html${search}`;
             
             const urlElement = document.getElementById('mobileUrlText');
             if (urlElement) {
