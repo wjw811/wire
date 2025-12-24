@@ -2002,7 +2002,7 @@
                 tabHarmonic: '谐波组',
                 tabSingleParam: '单参数设置',
                 systemParamParallelCabinets: '并联柜体数量',
-                systemParamModuleCapacityRatio: '柜内模块容量占比',
+                systemParamModuleCapacityRatio: '柜内容量',
                 systemParamDIEnable: 'DI启停使能',
                 systemParamAutoEnable: '自启停使能',
                 systemParamPowerFactor: '功率因数',
@@ -2011,6 +2011,8 @@
                 msgNoData: '暂无数据',
                 msgNotConnected: '未连接设备，请点击"连接"按钮',
                 msgClearLog: '清空',
+                faultDetectedTitle: '检测到设备异常',
+                faultDetectedDesc: '检测到告警信号，请及时检查设备或查看历史记录',
                 infoCardEmpty: '暂无数据',
                 infoCardWaiting: '等待设备上报...',
                 // 配置
@@ -2231,6 +2233,8 @@
                 msgNoData: 'No Data',
                 msgNotConnected: 'Device not connected, please click "Connect"',
                 msgClearLog: 'Clear',
+                faultDetectedTitle: 'Device Anomaly Detected',
+                faultDetectedDesc: 'Alarm signals detected, please check the device or history logs',
                 infoCardEmpty: 'No data',
                 infoCardWaiting: 'Waiting for device updates...',
                 // Config
@@ -3631,8 +3635,8 @@
                         <label>${t('systemParamModuleCapacityRatio')}</label>
                         <div style="display: flex; gap: 10px;">
                             <input type="number" id="module_capacity_ratio" placeholder="${t('inputPlaceholder')}" style="flex: 1; padding: 8px; border: 1px solid #d9d9d9; border-radius: 4px;">
-                            <button class="btn btn-primary" onclick="queryParam(161, 'module_capacity_ratio')">${t('btnQuery')}</button>
-                            <button class="btn btn-success" onclick="saveParam(161, 'module_capacity_ratio')">${t('btnSave')}</button>
+                            <button class="btn btn-primary" onclick="queryParam(124, 'module_capacity_ratio')">${t('btnQuery')}</button>
+                            <button class="btn btn-success" onclick="saveParam(124, 'module_capacity_ratio')">${t('btnSave')}</button>
                         </div>
                     </div>
                     
@@ -3672,8 +3676,8 @@
                     </div>
                     
                     <div style="margin-top: 20px; text-align: right;">
-                        <button class="btn btn-primary" onclick="batchQuery([151, 161, 9, 512, 280])">${t('btnBatchQuery')}</button>
-                        <button class="btn btn-success" onclick="batchSave([151, 161, 9, 512, 280])">${t('btnBatchSave')}</button>
+                        <button class="btn btn-primary" onclick="batchQuery([151, 124, 9, 512, 280])">${t('btnBatchQuery')}</button>
+                        <button class="btn btn-success" onclick="batchSave([151, 124, 9, 512, 280])">${t('btnBatchSave')}</button>
                     </div>
                 </div>
             `;
@@ -3730,6 +3734,50 @@
                 return;
             }
             
+            // ✨ 修复：服务器模式下不需要WebSocket连接，通过API查询
+            if (isUsingServerMode) {
+                const urlParams = new URLSearchParams(window.location.search);
+                const devId = urlParams.get('id');
+                
+                if (!devId) {
+                    addLog('error', '❌ 服务器模式下查询参数需要 URL 包含 id 参数');
+                    return;
+                }
+
+                addLog('info', `[单参数] 📡 服务器模式：正在查询功能码 ${addr}...`);
+                
+                try {
+                    // 1. 发送同步指令
+                    await fetch(`/admin/dash/cmd?id=${devId}&cmd=${addr}&mode=syn`);
+                    
+                    // 2. 轮询获取结果 (尝试 5 次)
+                    let val = null;
+                    for (let i = 0; i < 5; i++) {
+                        await new Promise(r => setTimeout(r, 1000));
+                        const res = await fetch(`/admin/dash/sync?id=${devId}&addr=${addr}`).then(r => r.json());
+                        if (res.code === 0 && res.result && res.result.val !== undefined && res.result.val !== null) {
+                            val = res.result.val;
+                            break;
+                        }
+                    }
+
+                    if (val !== null) {
+                        valInput.value = formatParamValueForDisplay(addr, val, 'single_param_val');
+                        resultDiv.style.display = 'block';
+                        resultContent.innerHTML = t('singleParamResultMessage')
+                            .replace('{addr}', addr)
+                            .replace('{value}', valInput.value);
+                        addLog('info', `[单参数] ✅ 查询成功，功能码${addr} = ${valInput.value}`);
+                    } else {
+                        addLog('warn', `[单参数] ⚠️ 查询超时：未收到功能码 ${addr} 的设备响应`);
+                    }
+                } catch (error) {
+                    addLog('error', `[单参数] ❌ 查询异常: ${error.message}`);
+                }
+                return;
+            }
+            
+            // 仅在直连模式下检查 WebSocket 连接
             if (!ws || ws.readyState !== 1) {
                 alert(t('alertNotConnected'));
                 return;
@@ -3767,7 +3815,8 @@
         // 保存单个参数
         async function saveSingleParam() {
             const addr = parseInt(document.getElementById('single_param_addr').value);
-            const val = parseInt(document.getElementById('single_param_val').value);
+            const valInput = document.getElementById('single_param_val');
+            const val = parseDisplayValueToNumber(addr, valInput.value, 'single_param_val');
             const resultDiv = document.getElementById('singleParamResult');
             const resultContent = document.getElementById('singleParamResultContent');
             
@@ -3776,11 +3825,46 @@
                 return;
             }
             
-            if (isNaN(val) || val < 0 || val > 65535) {
+            if (val === null || val === undefined || isNaN(val) || val < 0 || val > 65535) {
                 alert(t('alertInvalidValueRange'));
                 return;
             }
             
+            // ✨ 修复：服务器模式下不需要WebSocket连接，通过API保存
+            if (isUsingServerMode) {
+                const urlParams = new URLSearchParams(window.location.search);
+                const devId = urlParams.get('id');
+                
+                if (!devId) {
+                    addLog('error', '❌ 服务器模式下保存参数需要 URL 包含 id 参数');
+                    return;
+                }
+
+                addLog('info', `[单参数] 📡 服务器模式：正在保存功能码 ${addr}，值: ${val}...`);
+                
+                try {
+                    const res = await fetch(`/admin/dash/cmd?id=${devId}&cmd=${addr}&val=${val}&mode=pam`).then(r => r.json());
+                    if (res.code === 0) {
+                        resultDiv.style.display = 'block';
+                        resultContent.innerHTML = t('singleParamSaveMessage')
+                            .replace('{addr}', addr)
+                            .replace('{value}', valInput.value);
+                        addLog('info', `[单参数] ✅ 保存成功：功能码 ${addr} = ${valInput.value}`);
+                        
+                        // 1秒后自动查询验证
+                        setTimeout(() => {
+                            querySingleParam();
+                        }, 1000);
+                    } else {
+                        addLog('error', `[单参数] ❌ 保存失败: ${res.msg || '未知错误'}`);
+                    }
+                } catch (error) {
+                    addLog('error', `[单参数] ❌ 保存异常: ${error.message}`);
+                }
+                return;
+            }
+            
+            // 仅在直连模式下检查 WebSocket 连接
             if (!ws || ws.readyState !== 1) {
                 alert(t('alertNotConnected'));
                 return;
@@ -3798,7 +3882,7 @@
                 resultDiv.style.display = 'block';
                 resultContent.innerHTML = t('singleParamSaveMessage')
                     .replace('{addr}', addr)
-                    .replace('{value}', val);
+                    .replace('{value}', valInput.value);
                 addLog('info', '[单参数] ✅ 保存命令已发送');
                 
                 // 1秒后自动查询验证
@@ -4016,6 +4100,40 @@
         // 查询参数值（返回Promise）
         function queryParamValue(funcCode) {
             return new Promise((resolve, reject) => {
+                // ✨ 修复：服务器模式下不需要WebSocket连接，通过API查询
+                if (isUsingServerMode) {
+                    const urlParams = new URLSearchParams(window.location.search);
+                    const devId = urlParams.get('id');
+                    if (!devId) {
+                        reject(new Error('服务器模式下查询参数需要 URL 包含 id 参数'));
+                        return;
+                    }
+                    // 服务器模式下通过API查询，不依赖WebSocket
+                    fetch(`/admin/dash/cmd?id=${devId}&cmd=${funcCode}&mode=syn`)
+                        .then(() => {
+                            // 轮询获取结果
+                            let attempts = 0;
+                            const poll = () => {
+                                attempts++;
+                                fetch(`/admin/dash/sync?id=${devId}&addr=${funcCode}`)
+                                    .then(r => r.json())
+                                    .then(res => {
+                                        if (res.code === 0 && res.result && res.result.val !== undefined && res.result.val !== null) {
+                                            resolve(res.result.val);
+                                        } else if (attempts < 5) {
+                                            setTimeout(poll, 1000);
+                                        } else {
+                                            reject(new Error('查询超时'));
+                                        }
+                                    })
+                                    .catch(err => reject(err));
+                            };
+                            setTimeout(poll, 1000);
+                        })
+                        .catch(err => reject(err));
+                    return;
+                }
+                
                 const serial = parseInt(document.getElementById('deviceSerial').value) || 1;
                 const serialHex = parseInt(serial).toString(16).padStart(2, '0').toUpperCase();
                 const cmdHex = buildQueryCmd(serial, funcCode);
@@ -4665,6 +4783,9 @@
                 deviceLimit = deviceInfo.limit;
             }
             
+            // ✨ 修复：添加服务器端解析出的告警状态
+            deviceData._serverWarn = deviceInfo.warn || false;
+            
             return deviceData;
         }
         
@@ -4876,8 +4997,12 @@
             .then(data => {
                 if (data.code === 0) {
                     addLog('info', `✅ 指令发送成功 (${mode})`);
-                    // 指令成功后立即触发一次刷新，获取最新状态
-                    setTimeout(queryDeviceFromServer, 500); 
+                    // ✨ 修复：指令成功后延迟刷新，确保设备有时间响应命令并更新状态
+                    // 延迟1.5秒后刷新设备数据，获取最新的运行/停机状态
+                    setTimeout(() => {
+                        addLog('info', `🔄 自动刷新设备状态以更新运行/停机状态...`);
+                        queryDeviceFromServer();
+                    }, 1500); 
                 } else {
                     addLog('error', `❌ 指令发送失败: ${data.msg || '未知错误'}`);
                 }
@@ -5283,7 +5408,7 @@
         
         // 工作模式转换函数（与补偿模式显示一致）
         function convertWorkMode(value) {
-            // 如果是空或无效值，显示“--”
+            // 如果是空或无效值，显示"--"
             if (value === undefined || value === null || value === '' || value === '-' || value === '_') {
                 return '--';
             }
@@ -5296,6 +5421,11 @@
             const numValue = parseInt(value);
             if (isNaN(numValue)) {
                 return '--';
+            }
+
+            // ✨ 修复：255 (0xFF) 通常表示无效值或未初始化，应显示为"未知模式"
+            if (numValue === 255 || numValue === 0xFF) {
+                return currentLang === 'en' ? 'Unknown Mode' : '未知模式';
             }
 
             const modeMap = {
@@ -5341,11 +5471,11 @@
                 return v / percent;
             }
             
-            // 修改：运行模式（工作模式）优先根据地址513（f51，对应bytes[104]）显示
+            // ✨ 修复：运行模式应该和工作模式一致，优先使用地址513（f51，对应bytes[104]）的值
             const f51Value = bytes[104] || 0;
             const f60Raw = (bytes[119] << 8) | bytes[120];
-            // 如果513地址有值且不为0，优先使用513地址的值作为运行模式显示
-            const displayModeValue = f51Value > 0 ? f51Value : f60Raw;
+            // 优先使用地址513的值，如果地址513无效（0或255），才使用f60的值
+            const displayModeValue = (f51Value > 0 && f51Value !== 255) ? f51Value : (f60Raw !== 255 ? f60Raw : 255);
             
             // 解析按钮控制逻辑（根据bytes[43]的bit1和bit5）
             // 调试：显示 f20 的原始值
@@ -6008,35 +6138,40 @@
                         card.keys.forEach((key, keyIndex) => {
                             // 特殊处理：运行模式（f60）只显示内容，不显示"工作模式"标签
                             if (card.titleKey === 'cardRunMode' && key === 'f60') {
-                                if (data.hasOwnProperty(key)) {
-                                    let displayVal = data[key];
-                                    // 特殊处理：运行模式，如果 f60 为空（-），尝试用 f51 (对应地址513) 或缓存
-                                    if ((displayVal === '-' || displayVal === '_' || !displayVal)) {
-                                        if (data.f51 && data.f51 !== '-' && data.f51 !== '_') {
-                                            displayVal = data.f51;
-                                        } else if (paramCache[513] !== undefined) {
-                                            displayVal = paramCache[513];
-                                        }
-                                    }
-                                    
-                                    const value = formatParamValue(key, displayVal);
-                                    // 添加调试日志，帮助排查服务器返回的具体数值
-                                    if (key === 'f60') {
-                                        addLog('debug', `[运行模式] 最终取值: ${displayVal} (原始f60=${data[key]}, f51=${data.f51}), 转换后: ${value}`);
-                                    }
-                                    const item = document.createElement('div');
-                                    item.className = 'param-item';
-                                    item.style.display = 'flex';
-                                    item.style.justifyContent = 'center';
-                                    item.style.alignItems = 'center';
-                                    item.style.textAlign = 'center';
-                                    item.style.width = '100%';
-                                    item.innerHTML = `
-                                        <span class="param-value" style="font-size: 18px; font-weight: 600; color: #262626;">${value}</span>
-                                    `;
-                                    body.appendChild(item);
-                                    cardTotal++;
+                                // ✨ 修复：运行模式应该和工作模式一致，直接使用地址513的值
+                                let displayVal = null;
+                                
+                                // 优先使用地址513的值（f51或缓存）
+                                if (data.f51 !== undefined && data.f51 !== null && data.f51 !== '-' && data.f51 !== '_' && data.f51 !== 255) {
+                                    displayVal = data.f51;
+                                } else if (paramCache[513] !== undefined && paramCache[513] !== null && paramCache[513] !== 255) {
+                                    displayVal = paramCache[513];
+                                } else if (data.hasOwnProperty(key) && data[key] !== '-' && data[key] !== '_' && data[key] !== 255) {
+                                    // 如果地址513没有值，才使用f60的值
+                                    displayVal = data[key];
                                 }
+                                
+                                // 如果还是没有值，显示未知模式
+                                if (displayVal === null || displayVal === undefined || displayVal === 255) {
+                                    displayVal = 255; // 让convertWorkMode处理255
+                                }
+                                
+                                const value = formatParamValue(key, displayVal);
+                                // 添加调试日志，帮助排查服务器返回的具体数值
+                                addLog('debug', `[运行模式] 最终取值: ${displayVal} (f51=${data.f51}, 缓存513=${paramCache[513]}, 原始f60=${data[key]}), 转换后: ${value}`);
+                                
+                                const item = document.createElement('div');
+                                item.className = 'param-item';
+                                item.style.display = 'flex';
+                                item.style.justifyContent = 'center';
+                                item.style.alignItems = 'center';
+                                item.style.textAlign = 'center';
+                                item.style.width = '100%';
+                                item.innerHTML = `
+                                    <span class="param-value" style="font-size: 18px; font-weight: 600; color: #262626;">${value}</span>
+                                `;
+                                body.appendChild(item);
+                                cardTotal++;
                             } else if (data.hasOwnProperty(key)) {
                                 const value = formatParamValue(key, data[key]);
                                 createParamItem(body, key, value);
@@ -6215,36 +6350,52 @@
             const faults = [];
             const faultKeys = ['f51', 'f50', 'f49', 'f48'];  // 故障信息2,3,4,5
             
-            let allZero = true;
-            let hasData = false;
+            let hasValidData = false;
 
             faultKeys.forEach(key => {
                 const value = data[key];
-                if (value !== undefined) {
-                    hasData = true;
-                    if (parseInt(value) !== 0) allZero = false;
-                }
-
-                const lang = faultBitDef[currentLang] ? currentLang : 'zh';
-                if (value !== undefined && faultBitDef[lang] && faultBitDef[lang][key]) {
+                if (value !== undefined && value !== null && value !== '-') {
+                    hasValidData = true;
                     const byteValue = parseInt(value);
                     
-                    // 检查每一位（0-7位）
-                    for (let bit = 0; bit < 8; bit++) {
-                        // 位为0表示有故障
-                        if (((byteValue >> bit) & 1) === 0) {
-                            const faultName = getFaultName(key, bit);
-                            // 排除"保留"和"Reserved"
-                            if (faultName && faultName !== '保留' && faultName !== 'Reserved') {
-                                faults.push(faultName);
+                    // 如果解析失败，跳过
+                    if (isNaN(byteValue)) {
+                        return;
+                    }
+
+                    // ✨ 修复：如果字节值为255 (0xFF)，表示所有位都是1，即无故障，直接跳过
+                    if (byteValue === 255) {
+                        return;
+                    }
+
+                    const lang = faultBitDef[currentLang] ? currentLang : 'zh';
+                    if (faultBitDef[lang] && faultBitDef[lang][key]) {
+                        // 检查每一位（0-7位）
+                        for (let bit = 0; bit < 8; bit++) {
+                            // 位为0表示有故障
+                            if (((byteValue >> bit) & 1) === 0) {
+                                const faultName = getFaultName(key, bit);
+                                // 排除"保留"和"Reserved"
+                                if (faultName && faultName !== '保留' && faultName !== 'Reserved') {
+                                    faults.push(faultName);
+                                }
                             }
                         }
                     }
                 }
             });
 
-            // 如果所有故障寄存器都是0且没有状态数据，可能是未收到真实数据，不显示故障
-            const finalFaults = (allZero && hasData && faults.length > 10) ? [] : faults;
+            // ✨ 优化：判断是否为真实的故障数据
+            // 如果所有故障寄存器都是0，且故障数量多得离谱（比如全中），且没有关键状态数据f20
+            // 则可能是通信尚未建立或数据全零初始化，这种情况下先不显示报警
+            // 但如果 f20 有值且不为 0，说明已经有业务数据上报，此时 0 应该被视为真实的“全故障”状态
+            const isAllZero = faultKeys.every(k => {
+                const val = parseInt(data[k]);
+                return isNaN(val) || val === 0;
+            });
+            // 只有当 f20 为空或 0，且所有故障字段都是 0，且故障多于 28 个（接近 32 个满额）时才认为是初始化数据
+            const isLikelyInitialNoData = (isAllZero && faults.length > 28 && (data.f20 === undefined || data.f20 === 0));
+            const finalFaults = isLikelyInitialNoData ? [] : faults;
             
             // 根据故障情况显示横幅
             if (finalFaults.length > 0) {
@@ -6252,11 +6403,25 @@
                 banner.className = 'fault-banner active';
                 icon.textContent = '⚠️';
                 icon.className = 'fault-icon';  // 重置图标类名，移除旋转动画
-                title.textContent = t('faultCountLabel').replace('{count}', finalFaults.length);
+                
+                // 如果设备正在复位，在标题中体现
+                if (data.f20 === 247) {
+                    title.textContent = `${t('deviceResettingTitle')} (${t('faultCountLabel').replace('{count}', finalFaults.length)})`;
+                } else {
+                    title.textContent = t('faultCountLabel').replace('{count}', finalFaults.length);
+                }
                 
                 // 启动滚动显示
                 startFaultScroll(finalFaults);
-            } else if (data.f20 !== undefined || data.f51 !== undefined || (isUsingServerMode && hasData)) {
+            } else if (isUsingServerMode && data._serverWarn === true) {
+                // ✨ 新增：如果服务器报告有报警但前端没解析出位，显示通用报警
+                banner.className = 'fault-banner active';
+                icon.textContent = '⚠️';
+                icon.className = 'fault-icon';
+                title.textContent = t('faultDetectedTitle') || '检测到设备异常';
+                details.textContent = t('faultDetectedDesc') || '请检查设备状态或日志';
+                stopFaultScroll();
+            } else if (data.f20 !== undefined || data.f51 !== undefined || (isUsingServerMode && hasValidData)) {
                 showNormalStatus(banner, icon, title, details, data);
             } else {
                 // 无数据：隐藏横幅
@@ -7297,7 +7462,7 @@
                 512: 'auto_enable',
                 513: 'comp_mode',
                 151: 'parallel_cabinets',
-                161: 'module_capacity_ratio',
+                124: 'module_capacity_ratio',
                 280: 'power_factor',
                 13: 'dev_sample_pos',
                 14: 'dev_sample_dir',
