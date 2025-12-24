@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/hex"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
@@ -67,6 +68,9 @@ func main() {
 	// http service
 	go pub(srv)
 	
+	// start global broadcast (20s)
+	startBroadcast(srv)
+	
 	// register wire3 routes
 	RegisterWire3Routes()
 
@@ -77,4 +81,38 @@ func main() {
 
 	// stop server
 	srv.Stop()
+}
+
+// startBroadcast 每20秒向所有在线设备发送一次巡检指令
+func startBroadcast(srv *tcp.Server) {
+	ticker := time.NewTicker(20 * time.Second)
+	device := NewDevice()
+	go func() {
+		log.Infof("[Broadcast] Started global polling task (20s interval)")
+		for range ticker.C {
+			connCount := 0
+			srv.Conns().Range(func(key, val interface{}) bool {
+				conn := val.(*tcp.Conn)
+				// 只有已授权并分配了 SN 的连接才发送
+				if conn.SN != "" {
+					// 生成查询命令：Slave ID = 1, 地址 = 0x4156 (AVK查询，大部分设备支持)
+					queryCmd := device.wire3Proto.GenerateQueryCommand(1, 0x4156)
+					if cmd, err := hex.DecodeString(queryCmd); err == nil {
+						// 构造外层协议并发送
+						packet := NewPacket(C_DA1, cmd)
+						err := conn.AsyncWritePacket(packet, time.Second)
+						if err != nil {
+							log.Errorf("[Broadcast] Send error to %s: %v", conn.SN, err)
+						} else {
+							connCount++
+						}
+					}
+				}
+				return true
+			})
+			if connCount > 0 {
+				log.Infof("[Broadcast] Sent periodic query to %d active connections", connCount)
+			}
+		}
+	}()
 }

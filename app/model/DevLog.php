@@ -45,10 +45,13 @@ class DevLog extends \Next\Core\Model {
             $w = [];
             $arr = ['f48', 'f49', 'f50', 'f51'];
             foreach ($arr as $k) {
-                if (isset($d[$k]) && $d[$k]) {
+                // ✨ 修复：根据协议，位为0表示有故障，255 (0xFF) 表示无故障。
+                // 如果值存在且不是 255，则认为存在故障位。
+                if (isset($d[$k]) && $d[$k] !== 255 && $d[$k] !== "255" && $d[$k] !== "") {
                     $w[$k] = $d[$k];
                 }
             }
+            $key = sprintf('d:%s:%s', $gid, $serial);
             if ($w) {
                 $a = [
                     'did'     => $did,
@@ -63,7 +66,6 @@ class DevLog extends \Next\Core\Model {
                     $this->app->log->error(sprintf('gid: %s, d: %s', $gid, $e));
                     return false;
                 }
-                $key = sprintf('d:%s:%s', $gid, $d['sn']);
                 $this->app->redis->hSet($key, 's', 1);
 
                 // mail
@@ -85,6 +87,9 @@ class DevLog extends \Next\Core\Model {
                     $this->app->log->error('devlog.pomo > mail send exception');
                     $this->app->log->error($e->getMessage());
                 }
+            } else {
+                // ✨ 修复：当没有故障时（所有故障字段为255），清除 Redis 中的报警状态
+                $this->app->redis->hSet($key, 's', 0);
             }
 
             return true;

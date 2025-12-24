@@ -91,6 +91,23 @@ class Dev extends \Next\Core\Control {
             }
         }
 
+        // LIFE模式：心跳或确认帧，仅更新在线状态
+        if ($d['mode'] == 'LIFE') {
+            $time = time();
+            $mDev = new \app\model\Dev();
+            $resolvedDevSerial = '1'; 
+            try {
+                $devices = $mDev->select(['serial'], ['gid' => $gid, 'status[!]' => 9]);
+                if (count($devices) >= 1) {
+                    $resolvedDevSerial = $devices[0]['serial'];
+                }
+            } catch (\Exception $e) {}
+
+            $key = sprintf('d:%s:%s', $gid, $resolvedDevSerial);
+            $this->app->redis->hSet($key, 't', $time);
+            $this->app->redis->expire($key, 300);
+        }
+
         // CK
         if ($d['mode'] == 'CK') {
             $time = time();
